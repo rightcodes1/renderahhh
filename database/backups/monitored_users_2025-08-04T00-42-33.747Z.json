@@ -1,0 +1,14 @@
+{
+  "123456789012345678": {
+    "lastStatus": "online",
+    "lastActiveTime": 1754268153745,
+    "lastNotificationTime": 0,
+    "channelId": "987654321098765432",
+    "afk": false,
+    "lastAvatar": "default",
+    "sessionTime": 120000,
+    "startTime": 1754268093745,
+    "monitoringSince": 1754264553745,
+    "notifications": 5
+  }
+}
