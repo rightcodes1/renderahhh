@@ -1,5 +1,6 @@
 const { Events, EmbedBuilder } = require("discord.js");
 const tiktok = require('tiktok-scraper-without-watermark');
+const result = await tiktok.tiklydown(tiktokURL)
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
