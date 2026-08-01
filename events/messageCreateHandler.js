@@ -1,18 +1,8 @@
 const { Events, EmbedBuilder, ChannelType } = require("discord.js");
+const { TiktokDL } = require("@tobyg74/tiktok-api-dl");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
-
-// ===== Dynamic import helper for the ESM-only package =====
-let downloadFn = null;
-async function getDownloadFunction() {
-  if (!downloadFn) {
-    const mod = await import('tiktok-scraper-without-watermark');
-    // musicallydown is one of the named exports (confirmed by your debug log)
-    downloadFn = mod.musicallydown;
-  }
-  return downloadFn;
-}
 
 // ===== TikTok URL validation =====
 const STARTERS = [
@@ -63,12 +53,9 @@ module.exports = {
     });
 
     try {
-      // 1. Get the no-watermark video link using musicallydown
-      const download = await getDownloadFunction();
-      const result = await download(tiktokURL);
+      // 1. Get the no-watermark video link using the new package
+      const result = await TiktokDL(tiktokURL);
 
-      // The result structure may vary – adjust if needed
-      // For musicallydown, it typically has { video: { noWatermark: "..." } }
       if (!result || !result.video || !result.video.noWatermark) {
         throw new Error("Could not extract the video. It might be private or region-locked.");
       }
