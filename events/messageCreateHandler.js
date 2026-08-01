@@ -10,10 +10,11 @@ const STARTERS = [
   'https://vt.tiktok.com/', 'http://vt.tiktok.com/'
 ];
 
-const TIKTOK_URL_REGEX = /^https?:\/\/(www|vm|m|vt)\.tiktok\.com\/[\w\-/.]+$/;
+// Updated Regex to support @, dots, and query parameters
+const TIKTOK_URL_REGEX = /^https?:\/\/(www|vm|m|vt )\.tiktok\.com\/[^\s]+$/;
 
 function getValidTikTokLink(msg) {
-  for (const element of msg.split(' ')) {
+  for (const element of msg.split(/\s+/)) {
     if (STARTERS.some(starter => element.startsWith(starter)) && TIKTOK_URL_REGEX.test(element)) {
       return element;
     }
@@ -27,34 +28,28 @@ async function downloadTikTokVideo(url) {
       url,
       method: 'GET',
       responseType: 'stream',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+      },
       validateStatus: function (status) {
         return status < 400;
       }
     });
 
-    if (response.headers['content-type'].indexOf('video') === -1) {
-      throw new Error("The link provided does not lead to a video. Please provide a valid TikTok video URL.");
+    if (!response.headers['content-type'] || response.headers['content-type'].indexOf('video') === -1) {
+      throw new Error("The link provided does not lead directly to a video file. If this is a standard TikTok page link, the bot might need a scraper to extract the video source.");
     }
 
     return response;
   } catch (err) {
     const timestamp = new Date().toISOString();
-    
     if (err.response) {
       console.error(`[${timestamp}] Error: Failed to download video from ${url}`);
-      console.error(`Status Code: ${err.response.status}`);
-      console.error(`Response Data: ${err.response.data}`);
-      
       if (err.response.status === 403) {
-        throw new Error("This video is restricted and cannot be downloaded. It might be private or blocked in your region.");
-      } else if (err.response.status === 404) {
-        throw new Error("The video could not be found. Please check the URL and try again.");
+        throw new Error("This video is restricted or the request was blocked. Try using a direct video URL.");
       }
-    } else {
-      console.error(`[${timestamp}] Error: Network or unexpected error while accessing ${url}`);
-      console.error(`Error Message: ${err.message}`);
     }
-    throw new Error("Failed to download the video. This could be due to an unsupported URL or a network issue.");
+    throw new Error(err.message || "Failed to download the video.");
   }
 }
 
@@ -63,39 +58,22 @@ module.exports = {
   async execute(message) {
     if (message.author.bot) return;
 
-    // Check for specific channel ID if needed
-    const allowedChannelId = '790218273500168245'; // User-specified channel ID
+    // Channel restriction
+    const allowedChannelId = '790218273500168245'; 
     if (message.channel.id !== allowedChannelId) return;
 
     const tiktokURL = getValidTikTokLink(message.content);
-    if (!tiktokURL) {
-      await message.channel.send({
-        embeds: [new EmbedBuilder()
-          .setTitle(':warning: Invalid Link')
-          .setColor('#ffcc00')
-          .setDescription(
-            "Couldn't find a valid TikTok link in your message. Please ensure your link matches one of the following formats:\n" +
-            "**Supported formats:**\n" +
-            "- `https://www.tiktok.com/`\n" +
-            "- `https://vm.tiktok.com/`\n" +
-            "- `https://m.tiktok.com/v/`\n" +
-            "- `https://vt.tiktok.com/`\n\n" +
-            "Make sure the link is public and accessible."
-          )]
-      });
-      return;
-    }
+    if (!tiktokURL) return; // Silent return if no link found to avoid spamming
 
     const canSendMessages = message.channel.type === 'dm' ||
       message.channel.permissionsFor(message.client.user).has('SEND_MESSAGES');
 
     if (!canSendMessages) return;
 
-    let statusMessage;
-    statusMessage = await message.channel.send({
+    let statusMessage = await message.channel.send({
       embeds: [new EmbedBuilder()
         .setTitle('Video Status')
-        .setDescription('Downloading the video, please wait...')
+        .setDescription('Processing TikTok link...')
         .setColor('#00bfff')
       ]
     });
@@ -103,66 +81,44 @@ module.exports = {
     try {
       const videoData = await downloadTikTokVideo(tiktokURL);
       const videoDir = path.join(__dirname, '..', 'videos');
-      if (!fs.existsSync(videoDir)) {
-        fs.mkdirSync(videoDir);
-      }
+      if (!fs.existsSync(videoDir)) fs.mkdirSync(videoDir);
+      
       const videoPath = path.join(videoDir, `${Date.now()}.mp4`);
       const writer = fs.createWriteStream(videoPath);
 
       videoData.data.pipe(writer);
 
       writer.on('finish', async () => {
-        const requester = {
-          avatarURL: message.author.displayAvatarURL(),
-          name: message.author.tag
-        };
-
         const responseEmbed = new EmbedBuilder()
-          .setTitle('Here is your TikTok video')
-          .setDescription(`Requested by: ${requester.name}`)
-          .setThumbnail(requester.avatarURL)
+          .setTitle('TikTok Video Ready')
+          .setDescription(`Requested by: ${message.author.tag}`)
           .setColor('#00bfff')
-          .addFields(
-            { name: 'Original Link', value: tiktokURL, inline: false }
-          )
           .setTimestamp();
 
         await message.channel.send({
           embeds: [responseEmbed],
           files: [{ attachment: videoPath, name: `tiktok_video.mp4` }]
-        }).catch(err => {
-          console.error(`Error sending video: ${err}`);
         });
 
         if (statusMessage.deletable) statusMessage.delete();
-
-        fs.unlink(videoPath, (err) => {
-          if (err) console.error(`Error deleting video file: ${err}`);
-        });
+        fs.unlink(videoPath, (err) => { if (err) console.error(err); });
       });
 
       writer.on('error', (err) => {
-        console.error(`Error writing video file: ${err}`);
-        if (statusMessage.deletable) statusMessage.delete();
-        message.channel.send({
-          embeds: [new EmbedBuilder()
-            .setTitle(':rotating_light: Error')
-            .setColor('#ff0000')
-            .setDescription("Couldn't download the video. Please check if the video is public.")
-          ]
-        });
+        throw err;
       });
 
     } catch (err) {
-      console.error(`Error downloading video: ${err}`);
-      if (statusMessage.deletable) statusMessage.delete();
-      message.channel.send({
-        embeds: [new EmbedBuilder()
-          .setTitle(':rotating_light: Error')
-          .setColor('#ff0000')
-          .setDescription(err.message)
-        ]
-      });
+      console.error(`Error: ${err.message}`);
+      if (statusMessage.deletable) {
+        await statusMessage.edit({
+          embeds: [new EmbedBuilder()
+            .setTitle(':rotating_light: Error')
+            .setColor('#ff0000')
+            .setDescription(err.message)
+          ]
+        });
+      }
     }
   },
 };
