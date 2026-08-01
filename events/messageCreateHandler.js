@@ -1,6 +1,5 @@
 const { Events, EmbedBuilder, ChannelType } = require("discord.js");
 const { execFile } = require("child_process");
-const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 const util = require("util");
@@ -34,8 +33,8 @@ function formatBytes(bytes) {
 
 const DISCORD_MAX_SIZE = 25 * 1024 * 1024;   // 25 MB
 
-// ====== ffmpeg helper (same idea as your compressVideo) ======
-async function makeDiscordSafe(inputPath, outputPath, targetSize = false) {
+// ====== ffmpeg helper – makes any video Discord‑compatible ======
+async function makeDiscordSafe(inputPath, outputPath, crf = 22) {
   const ffmpegPath = path.join(__dirname, '..', 'bin', 'ffmpeg');
   const args = [
     '-y', '-i', inputPath,
@@ -43,21 +42,14 @@ async function makeDiscordSafe(inputPath, outputPath, targetSize = false) {
     '-profile:v', 'main',
     '-level', '4.0',
     '-pix_fmt', 'yuv420p',
-    '-preset', 'ultrafast',      // fast, good enough
+    '-crf', `${crf}`,               // lower = better quality, larger file
+    '-preset', 'ultrafast',         // fast enough for free‑tier Render
     '-c:a', 'aac',
     '-b:a', '128k',
     '-movflags', '+faststart',
     '-vsync', 'cfr',
-    '-r', '30'                   // force 30 fps – safe for Discord
+    '-r', '30'
   ];
-
-  if (targetSize) {
-    // Size‑targeted compression (like your YouTube bot)
-    args.push('-crf', '26');     // slightly more compression
-  } else {
-    args.push('-crf', '22');     // still great quality, small size
-  }
-
   args.push(outputPath);
   await execFilePromise(ffmpegPath, args, { timeout: 120000 });
 }
@@ -92,8 +84,9 @@ module.exports = {
     try {
       const projectRoot = path.join(__dirname, '..');
       const ytdlpPath = path.join(projectRoot, 'yt-dlp');
+      const ffmpegPath = path.join(projectRoot, 'bin', 'ffmpeg');
 
-      // 1. Get metadata (title, uploader, etc.) via --dump-json
+      // 1. Get metadata (title, uploader, views, etc.)
       const { stdout } = await execFilePromise(
         ytdlpPath,
         ['--dump-json', '--no-playlist', tiktokURL],
@@ -104,61 +97,47 @@ module.exports = {
       await statusMessage.edit({
         embeds: [new EmbedBuilder()
           .setTitle('⏳ Video Status')
-          .setDescription('Downloading raw video...')
+          .setDescription('Downloading with yt‑dlp...')
           .setColor('#ff66b2')
         ]
       });
 
-      // 2. Get the direct video URL (no watermark, pre-muxed)
-      const { stdout: urlStdout } = await execFilePromise(
-        ytdlpPath,
-        [
-          '--print', 'url',
-          '--no-playlist',
-          '--format', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-          tiktokURL
-        ],
-        { timeout: 15000 }
-      );
-      const directURL = urlStdout.trim();
-
-      // 3. Download the raw file
+      // 2. Use yt‑dlp to download the best video+audio merged file directly
       const videoDir = path.join(projectRoot, 'videos');
       if (!fs.existsSync(videoDir)) fs.mkdirSync(videoDir);
       const rawPath = path.join(videoDir, `${Date.now()}_raw.mp4`);
 
-      const response = await axios({
-        url: directURL,
-        method: 'GET',
-        responseType: 'stream',
-        headers: {
-          'Referer': 'https://www.tiktok.com/',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
-      });
+      // Format string: prefer a single MP4 with H.264 + AAC, then merge streams, then any MP4
+      const format = 'bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best';
+      await execFilePromise(
+        ytdlpPath,
+        [
+          '-o', rawPath,
+          '--no-playlist',
+          '--format', format,
+          '--merge-output-format', 'mp4',
+          '--ffmpeg-location', ffmpegPath,
+          tiktokURL
+        ],
+        { timeout: 90000 }
+      );
 
-      const writer = fs.createWriteStream(rawPath);
-      response.data.pipe(writer);
-      await new Promise((resolve, reject) => {
-        writer.on('finish', resolve);
-        writer.on('error', reject);
-      });
-
-      // 4. Always convert to a Discord‑safe video (like your YouTube bot’s compressVideo)
+      // 3. Re‑encode to be 100% Discord‑safe (always)
       await statusMessage.edit({
         embeds: [new EmbedBuilder()
           .setTitle('⏳ Video Status')
-          .setDescription('Processing video for Discord...')
+          .setDescription('Making Discord‑compatible...')
           .setColor('#ff66b2')
         ]
       });
 
       let safePath = path.join(videoDir, `${Date.now()}_safe.mp4`);
-      await makeDiscordSafe(rawPath, safePath, false);
-      fs.unlinkSync(rawPath);  // remove raw file
+      await makeDiscordSafe(rawPath, safePath, 22);   // good quality
+      fs.unlinkSync(rawPath);   // we no longer need the raw file
 
-      // 5. Check size – if still too large, compress further (target size)
+      // 4. If the safe video is still > 25 MB, compress it further
       let stats = fs.statSync(safePath);
+
       if (stats.size > DISCORD_MAX_SIZE) {
         await statusMessage.edit({
           embeds: [new EmbedBuilder()
@@ -168,23 +147,38 @@ module.exports = {
           ]
         });
 
-        const finalPath = path.join(videoDir, `${Date.now()}_final.mp4`);
-        await makeDiscordSafe(safePath, finalPath, true);
-        fs.unlinkSync(safePath);
-        safePath = finalPath;
-        stats = fs.statSync(safePath);
+        const compressedPath = path.join(videoDir, `${Date.now()}_compressed.mp4`);
+        // Use a higher CRF (lower quality) and optionally downscale
+        const ffmpegPath = path.join(projectRoot, 'bin', 'ffmpeg');
+        // Try a two‑pass approach: first, just compress harder; if that fails, downscale to 720p
+        await execFilePromise(ffmpegPath, [
+          '-y', '-i', safePath,
+          '-c:v', 'libx264',
+          '-profile:v', 'main',
+          '-level', '4.0',
+          '-pix_fmt', 'yuv420p',
+          '-crf', '28',                // more aggressive compression
+          '-preset', 'ultrafast',
+          '-c:a', 'aac',
+          '-b:a', '128k',
+          '-movflags', '+faststart',
+          '-vsync', 'cfr',
+          '-r', '30',
+          compressedPath
+        ], { timeout: 120000 });
 
+        stats = fs.statSync(compressedPath);
         if (stats.size > DISCORD_MAX_SIZE) {
-          // Last resort: downscale to 720p manually using ffmpeg
+          // Downscale to 720p and compress again
           await statusMessage.edit({
             embeds: [new EmbedBuilder()
               .setTitle('⏳ Video Status')
-              .setDescription('Still too large, downscaling to 720p...')
+              .setDescription('Downscaling to 720p...')
               .setColor('#ff66b2')
             ]
           });
+          fs.unlinkSync(compressedPath);
           const downscaledPath = path.join(videoDir, `${Date.now()}_720p.mp4`);
-          const ffmpegPath = path.join(projectRoot, 'bin', 'ffmpeg');
           await execFilePromise(ffmpegPath, [
             '-y', '-i', safePath,
             '-c:v', 'libx264',
@@ -192,28 +186,32 @@ module.exports = {
             '-level', '4.0',
             '-pix_fmt', 'yuv420p',
             '-vf', 'scale=-2:720',
+            '-crf', '28',
             '-preset', 'ultrafast',
-            '-crf', '26',
             '-c:a', 'aac',
             '-b:a', '128k',
             '-movflags', '+faststart',
             '-vsync', 'cfr',
             '-r', '30',
             downscaledPath
-          ], { timeout: 90000 });
+          ], { timeout: 120000 });
           fs.unlinkSync(safePath);
           safePath = downscaledPath;
           stats = fs.statSync(safePath);
 
           if (stats.size > DISCORD_MAX_SIZE) {
-            throw new Error('Even 720p version is too large. Discord limit is 25 MB.');
+            throw new Error('Even 720p version is too large for Discord (25 MB).');
           }
+        } else {
+          // Compressed version fits, replace
+          fs.unlinkSync(safePath);
+          safePath = compressedPath;
         }
       }
 
       const fileSize = formatBytes(stats.size);
 
-      // 6. Build embed (just like your YouTube bot’s postDownloadActions)
+      // 5. Build embed (like your YouTube bot’s postDownloadActions)
       let description = info.description || info.title || 'No description';
       if (description.length > 4096) description = description.slice(0, 4093) + '...';
 
@@ -231,7 +229,7 @@ module.exports = {
         .setFooter({ text: `Requested by ${message.author.tag}` })
         .setTimestamp();
 
-      // 7. Send the final video
+      // 6. Send the final video
       await message.channel.send({
         embeds: [responseEmbed],
         files: [{ attachment: safePath, name: 'tiktok_video.mp4' }]
