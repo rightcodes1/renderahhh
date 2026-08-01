@@ -2,31 +2,21 @@ const { Events } = require("discord.js");
 
 module.exports = {
   name: Events.InteractionCreate,
-  async execute(interaction, client, commands) {
+  async execute(interaction, commands) {
     if (!interaction.isChatInputCommand()) return;
 
     const command = commands.get(interaction.commandName);
-
-    if (!command) {
-      console.error(`No command matching ${interaction.commandName} was found.`);
-      return;
-    }
+    if (!command) return;
 
     try {
       await command.execute(interaction);
     } catch (error) {
-      console.error(`Error executing ${interaction.commandName}`);
       console.error(error);
+      const msg = { content: "There was an error while executing this command!", ephemeral: true };
       if (interaction.replied || interaction.deferred) {
-        await interaction.followUp({
-          content: "There was an error while executing this command!",
-          ephemeral: true,
-        });
+        await interaction.followUp(msg);
       } else {
-        await interaction.reply({
-          content: "There was an error while executing this command!",
-          ephemeral: true,
-        });
+        await interaction.reply(msg);
       }
     }
   },
