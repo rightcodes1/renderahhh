@@ -1,5 +1,10 @@
 const { Events, EmbedBuilder, ChannelType } = require("discord.js");
 const { execFile } = require("child_process");
+
+const fs = require("fs");
+const path = require("path");
+const util = require("util");
+const execFilePromise = util.promisify(execFile);
 const response = await axios({
   url: videoLink,
   method: 'GET',
@@ -9,11 +14,6 @@ const response = await axios({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
   }
 });
-const fs = require("fs");
-const path = require("path");
-const util = require("util");
-const execFilePromise = util.promisify(execFile);
-
 // ===== TikTok URL validation =====
 const STARTERS = [
   'https://vm.tiktok.com/', 'http://vm.tiktok.com/',
