@@ -6,68 +6,48 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildPresences,
-    GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMessageTyping
-  ],
-  partials: [
-    Partials.Message,
-    Partials.Channel,
-    Partials.User
+    GatewayIntentBits.MessageContent
   ]
 });
 
 const commands = new Collection();
-
 const commandsPath = path.join(__dirname, "commands");
-const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith(".js"));
 
-for (const file of commandFiles) {
-  const filePath = path.join(commandsPath, file);
-  const command = require(filePath);
-  commands.set(command.data.name, command);
+if (fs.existsSync(commandsPath)) {
+    const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith(".js"));
+    for (const file of commandFiles) {
+        const filePath = path.join(commandsPath, file);
+        const command = require(filePath);
+        // This check prevents the crash if a file is missing the 'data' property
+        if (command && command.data && command.data.name) {
+            commands.set(command.data.name, command);
+        } else {
+            console.log(`[WARNING] The command at ${filePath} is missing a required "data" or "name" property.`);
+        }
+    }
 }
 
 const eventsPath = path.join(__dirname, "events");
-const eventFiles = fs.readdirSync(eventsPath).filter(file => file.endsWith(".js"));
-
-for (const file of eventFiles) {
-  const filePath = path.join(eventsPath, file);
-  const event = require(filePath);
-  
-  if (event.once) {
-    client.once(event.name, (...args) => event.execute(...args, client, commands));
-  } else {
-    client.on(event.name, (...args) => event.execute(...args, client, commands));
-  }
+if (fs.existsSync(eventsPath)) {
+    const eventFiles = fs.readdirSync(eventsPath).filter(file => file.endsWith(".js"));
+    for (const file of eventFiles) {
+        const filePath = path.join(eventsPath, file);
+        const event = require(filePath);
+        if (event.once) {
+            client.once(event.name, (...args) => event.execute(...args, client, commands));
+        } else {
+            client.on(event.name, (...args) => event.execute(...args, client, commands));
+        }
+    }
 }
 
-client.on("error", (error) => {
-  console.error("Client error:", error);
-});
-
-process.on("unhandledRejection", (reason, promise) => {
-  console.error("Unhandled Rejection at:", promise, "reason:", reason);
-});
-
-process.on("uncaughtException", (error) => {
-  console.error("Uncaught Exception:", error);
-  process.exit(1);
-});
+client.on("error", console.error);
+process.on("unhandledRejection", console.error);
 
 client.login(process.env.DISCORD_TOKEN);
 
+// Keep-alive server for Render
 const express = require("express");
 const app = express();
-
-app.get("/", (req, res) => {
-  res.send("Bot is alive!");
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-});
-
-
+app.get("/", (req, res) => res.send("Bot is alive!"));
+app.listen(process.env.PORT || 3000, () => console.log("Server is ready."));
