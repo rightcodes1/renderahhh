@@ -166,16 +166,18 @@ module.exports = {
       fs.unlink(videoPath, () => {});
 
     } catch (err) {
-      console.error(err);
-      if (statusMessage.deletable) {
-        await statusMessage.edit({
-          embeds: [new EmbedBuilder()
-            .setTitle(':rotating_light: Error')
-            .setColor('#ff0000')
-            .setDescription(err.message)
-          ]
-        });
-      }
-    }
+  console.error(err);
+  let errorMsg = err.message || 'Unknown error';
+  if (errorMsg.length > 4000) errorMsg = errorMsg.slice(0, 4000) + '...';
+  if (statusMessage.deletable) {
+    await statusMessage.edit({
+      embeds: [new EmbedBuilder()
+        .setTitle(':rotating_light: Error')
+        .setColor('#ff0000')
+        .setDescription(errorMsg)
+      ]
+    });
+  }
+}
   }
 };
