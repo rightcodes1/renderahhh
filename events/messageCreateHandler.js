@@ -1,5 +1,5 @@
 const { Events, EmbedBuilder, ChannelType } = require("discord.js");
-const { execFile, execSync } = require("child_process");
+const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const util = require("util");
@@ -30,6 +30,8 @@ function formatBytes(bytes) {
   const i = Math.floor(Math.log(bytes) / Math.log(1024));
   return parseFloat((bytes / Math.pow(1024, i)).toFixed(2)) + ' ' + sizes[i];
 }
+
+const DISCORD_MAX_SIZE = 25 * 1024 * 1024; // 25 MB
 
 module.exports = {
   name: Events.MessageCreate,
@@ -66,7 +68,6 @@ module.exports = {
       const projectRoot = path.join(__dirname, '..');
       const ytdlpPath = path.join(projectRoot, 'yt-dlp');
       const ffmpegPath = path.join(projectRoot, 'bin', 'ffmpeg');
-      const ffprobePath = path.join(projectRoot, 'bin', 'ffprobe');
 
       // 1. Get metadata
       const { stdout } = await execFilePromise(
@@ -84,36 +85,48 @@ module.exports = {
         ]
       });
 
-      // 2. Download video with forced ffmpeg location
+      // 2. Download video – first try with the best quality
       const videoDir = path.join(projectRoot, 'videos');
       if (!fs.existsSync(videoDir)) fs.mkdirSync(videoDir);
-      const videoPath = path.join(videoDir, `${Date.now()}.mp4`);
+      let videoPath = path.join(videoDir, `${Date.now()}.mp4`);
 
-      await execFilePromise(
-        ytdlpPath,
-        [
-          '-o', videoPath,
-          '--no-playlist',
-          '--format', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-          '--merge-output-format', 'mp4',
-          '--ffmpeg-location', ffmpegPath,      // <-- explicit path
-          tiktokURL
-        ],
-        { timeout: 60000 }
-      );
-
-      // DEBUG: check file codecs (look in Render logs)
-      try {
-        const probe = execSync(`"${ffprobePath}" -v error -show_entries stream=codec_type -of default=noprint_wrappers=1 "${videoPath}"`).toString();
-        console.log('=== Codec types in downloaded file ===');
-        console.log(probe);
-        // Expect to see "codec_type=video" and "codec_type=audio"
-      } catch (probeErr) {
-        console.warn('ffprobe check failed:', probeErr.message);
+      // Function to download with a given format
+      async function downloadWithFormat(format) {
+        await execFilePromise(
+          ytdlpPath,
+          [
+            '-o', videoPath,
+            '--no-playlist',
+            '--format', format,
+            '--merge-output-format', 'mp4',
+            '--ffmpeg-location', ffmpegPath,
+            tiktokURL
+          ],
+          { timeout: 60000 }
+        );
       }
 
-      // 3. File size
-      const stats = fs.statSync(videoPath);
+      // Try best quality first
+      await downloadWithFormat('bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best');
+
+      // 3. Check file size – if too large, redownload with a size‑capped format (720p max)
+      let stats = fs.statSync(videoPath);
+      if (stats.size > DISCORD_MAX_SIZE) {
+        console.log(`File too large (${formatBytes(stats.size)}), re-downloading smaller version...`);
+        // Delete the oversized file
+        fs.unlinkSync(videoPath);
+        videoPath = path.join(videoDir, `${Date.now()}_small.mp4`);
+
+        // Limit video height to 720p and total file size to ~25 MB
+        await downloadWithFormat('bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best');
+        stats = fs.statSync(videoPath);
+
+        // If still too large, give an error
+        if (stats.size > DISCORD_MAX_SIZE) {
+          throw new Error(`Video is still too large (${formatBytes(stats.size)}). Discord limit is ${formatBytes(DISCORD_MAX_SIZE)}.`);
+        }
+      }
+
       const fileSize = formatBytes(stats.size);
 
       // 4. Embed description
