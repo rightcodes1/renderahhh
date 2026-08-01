@@ -1,10 +1,19 @@
-const { Events, EmbedBuilder } = require("discord.js");
-const tiktok = require('tiktok-scraper-without-watermark');
-const result = await tiktok.tiklydown(tiktokURL)
+const { Events, EmbedBuilder, ChannelType } = require("discord.js");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 
+// ----- Dynamic import helper for ESM package -----
+let tiklydownFn = null;
+async function getTiklydown() {
+  if (!tiklydownFn) {
+    const module = await import('tiktok-scraper-without-watermark');
+    tiklydownFn = module.tiklydown; // named export
+  }
+  return tiklydownFn;
+}
+
+// ----- URL validation -----
 const STARTERS = [
   'https://vm.tiktok.com/', 'http://vm.tiktok.com/',
   'https://www.tiktok.com/', 'http://www.tiktok.com/',
@@ -12,7 +21,7 @@ const STARTERS = [
   'https://vt.tiktok.com/', 'http://vt.tiktok.com/'
 ];
 
-const TIKTOK_URL_REGEX = /^https?:\/\/(www|vm|m|vt )\.tiktok\.com\/[^\s]+$/;
+const TIKTOK_URL_REGEX = /^https?:\/\/(www|vm|m|vt)\.tiktok\.com\/[^\s]+$/; // fixed regex
 
 function getValidTikTokLink(msg) {
   for (const element of msg.split(/\s+/)) {
@@ -23,21 +32,21 @@ function getValidTikTokLink(msg) {
   return undefined;
 }
 
+// ----- Main event handler -----
 module.exports = {
   name: Events.MessageCreate,
   async execute(message) {
     if (message.author.bot) return;
 
-    // Channel restriction
-    const allowedChannelId = '790218273500168245'; 
+    const allowedChannelId = '790218273500168245';
     if (message.channel.id !== allowedChannelId) return;
 
     const tiktokURL = getValidTikTokLink(message.content);
     if (!tiktokURL) return;
 
-    const canSendMessages = message.channel.type === 'dm' ||
-      message.channel.permissionsFor(message.client.user).has('SEND_MESSAGES');
-
+    // Permission check (using ChannelType for DMs)
+    const canSendMessages = message.channel.type === ChannelType.DM ||
+      message.channel.permissionsFor(message.client.user).has('SendMessages');
     if (!canSendMessages) return;
 
     let statusMessage = await message.channel.send({
@@ -49,15 +58,16 @@ module.exports = {
     });
 
     try {
-      // Use the scraper to get the direct no-watermark link
-      const result = await tiktok.tiklydown(tiktokURL);
+      // Get the function dynamically
+      const tiklydown = await getTiklydown();
+      const result = await tiklydown(tiktokURL);
 
       if (!result || !result.video || !result.video.noWatermark) {
         throw new Error("Could not extract the video from this link. It might be private or region-locked.");
       }
 
       const videoLink = result.video.noWatermark;
-      
+
       await statusMessage.edit({
         embeds: [new EmbedBuilder()
           .setTitle('Video Status')
@@ -66,7 +76,7 @@ module.exports = {
         ]
       });
 
-      // Download the actual video file using axios
+      // Download video stream
       const response = await axios({
         url: videoLink,
         method: 'GET',
@@ -75,10 +85,9 @@ module.exports = {
 
       const videoDir = path.join(__dirname, '..', 'videos');
       if (!fs.existsSync(videoDir)) fs.mkdirSync(videoDir);
-      
+
       const videoPath = path.join(videoDir, `${Date.now()}.mp4`);
       const writer = fs.createWriteStream(videoPath);
-
       response.data.pipe(writer);
 
       writer.on('finish', async () => {
