@@ -1,6 +1,14 @@
 const { Events, EmbedBuilder, ChannelType } = require("discord.js");
 const { execFile } = require("child_process");
-const axios = require("axios");
+const response = await axios({
+  url: videoLink,
+  method: 'GET',
+  responseType: 'stream',
+  headers: {
+    'Referer': 'https://www.tiktok.com/',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+  }
+});
 const fs = require("fs");
 const path = require("path");
 const util = require("util");
