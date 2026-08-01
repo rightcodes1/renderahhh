@@ -47,16 +47,23 @@ module.exports = {
       message.channel.permissionsFor(message.client.user).has('SendMessages');
     if (!canSendMessages) return;
 
+    // Delete the original user message if possible
+    try {
+      if (message.deletable) await message.delete();
+    } catch (err) {
+      console.warn('Could not delete original message:', err.message);
+    }
+
     let statusMessage = await message.channel.send({
       embeds: [new EmbedBuilder()
-        .setTitle('Video Status')
+        .setTitle('⏳ Video Status')
         .setDescription('Scraping video info...')
         .setColor('#ff66b2')
       ]
     });
 
     try {
-      // 1. Get video metadata (title, uploader, views, likes)
+      // 1. Get video metadata
       const { stdout } = await execFilePromise(
         path.join(__dirname, '..', 'yt-dlp'),
         ['--dump-json', '--no-playlist', tiktokURL],
@@ -66,54 +73,62 @@ module.exports = {
 
       await statusMessage.edit({
         embeds: [new EmbedBuilder()
-          .setTitle('Video Status')
+          .setTitle('⏳ Video Status')
           .setDescription('Downloading video...')
           .setColor('#ff66b2')
         ]
       });
 
-      // 2. Download the video (proper video+audio) using yt-dlp + ffmpeg
+      // 2. Download proper video + audio using ffmpeg
       const videoDir = path.join(__dirname, '..', 'videos');
       if (!fs.existsSync(videoDir)) fs.mkdirSync(videoDir);
       const videoPath = path.join(videoDir, `${Date.now()}.mp4`);
 
-      // Use format string that guarantees video+audio in a single mp4 file
+      // Locate ffmpeg binary in the project root (from render-build.sh)
+      const ffmpegPath = path.join(__dirname, '..', 'ffmpeg');
+
       await execFilePromise(
         path.join(__dirname, '..', 'yt-dlp'),
         [
           '-o', videoPath,
           '--no-playlist',
           '--format', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-          '--merge-output-format', 'mp4',   // ensure final file is mp4
+          '--merge-output-format', 'mp4',
+          '--ffmpeg-location', ffmpegPath,   // tell yt-dlp where ffmpeg is
           tiktokURL
         ],
         { timeout: 60000 }
       );
 
-      // 3. Get file size for embed
+      // 3. Get file size
       const stats = fs.statSync(videoPath);
       const fileSize = formatBytes(stats.size);
 
-      // 4. Build the embed as requested
+      // Truncate description if too long
+      let description = info.description || info.title || 'No description';
+      if (description.length > 4096) description = description.slice(0, 4093) + '...';
+
+      // 4. Build the final embed
       const responseEmbed = new EmbedBuilder()
         .setTitle('🎵 TikTok Video Downloaded')
-        .setDescription(info.description || info.title || 'No description')
+        .setURL(tiktokURL)                                            // link title
+        .setDescription(description)
         .addFields(
           { name: '👤 Creator', value: info.uploader || 'Unknown', inline: true },
           { name: '📁 File Size', value: fileSize, inline: true },
           { name: '👀 Views', value: (info.view_count || 0).toLocaleString(), inline: true },
           { name: '❤️ Likes', value: (info.like_count || 0).toLocaleString(), inline: true }
         )
-        .setColor('#ff66b2')   // pink
-        .setTimestamp();
+        .setColor('#ff66b2')
+        .setFooter({ text: `Requested by ${message.author.tag}` })    // requester
+        .setTimestamp();                                               // current time
 
-      // 5. Send the video
+      // 5. Send the video and delete status message
       await message.channel.send({
         embeds: [responseEmbed],
         files: [{ attachment: videoPath, name: 'tiktok_video.mp4' }]
       });
 
-      // Cleanup
       if (statusMessage.deletable) statusMessage.delete();
       fs.unlink(videoPath, (err) => { if (err) console.error(err); });
 
