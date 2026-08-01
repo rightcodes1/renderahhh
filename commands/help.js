@@ -1,22 +1,20 @@
-const { EmbedBuilder } = require("discord.js");
+const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
 const CONFIG = require("../config");
 
 module.exports = {
-  name: "help",
-  description: "Show help message",
-  execute(message, args, client, monitoredUsers, saveFunction) {
+  data: new SlashCommandBuilder()
+    .setName("help")
+    .setDescription("Shows a list of available commands."),
+  async execute(interaction) {
     const embed = new EmbedBuilder()
       .setColor(CONFIG.EMBED_COLORS.INFO)
-      .setTitle("Pixe. APP Monitor - Help")
-      .setDescription("Commands available:")
-      .setFooter({ text: "Pixe. APP Monitoring System" })
-      .setTimestamp();
-    
-    for (const [command, description] of Object.entries(CONFIG.COMMANDS_HELP)) {
-      embed.addFields({ name: `${CONFIG.prefix}${command}`, value: description, inline: false });
-    }
-    
-    message.channel.send({ embeds: [embed] });
-  }
-};
+      .setTitle("Available Commands")
+      .setDescription("Here are the commands you can use:");
 
+    for (const commandName in CONFIG.COMMANDS_HELP) {
+      embed.addFields({ name: `/${commandName}`, value: CONFIG.COMMANDS_HELP[commandName] });
+    }
+
+    await interaction.reply({ embeds: [embed], ephemeral: true });
+  },
+};

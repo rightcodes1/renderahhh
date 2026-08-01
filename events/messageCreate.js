@@ -1,25 +1,33 @@
-const CONFIG = require("../config");
+const { Events } = require("discord.js");
 
 module.exports = {
-  name: "messageCreate",
-  execute(message, client, monitoredUsers, saveFunction, commands) {
-    // Ignore messages from bots or non-command messages
-    if (message.author.bot || !message.content.startsWith(CONFIG.prefix)) return;
-    
-    const args = message.content.slice(CONFIG.prefix.length).trim().split(/ +/);
-    const commandName = args.shift().toLowerCase();
-    
-    console.log(`Command received: ${commandName} with args: ${args.join(", ")}`);
-    
-    const command = commands.get(commandName);
-    if (!command) return;
-    
-    try {
-      command.execute(message, args, client, monitoredUsers, saveFunction);
-    } catch (error) {
-      console.error(`Error executing command ${commandName}:`, error);
-      message.reply("There was an error executing that command!");
-    }
-  }
-};
+  name: Events.InteractionCreate,
+  async execute(interaction, client, commands) {
+    if (!interaction.isChatInputCommand()) return;
 
+    const command = commands.get(interaction.commandName);
+
+    if (!command) {
+      console.error(`No command matching ${interaction.commandName} was found.`);
+      return;
+    }
+
+    try {
+      await command.execute(interaction);
+    } catch (error) {
+      console.error(`Error executing ${interaction.commandName}`);
+      console.error(error);
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp({
+          content: "There was an error while executing this command!",
+          ephemeral: true,
+        });
+      } else {
+        await interaction.reply({
+          content: "There was an error while executing this command!",
+          ephemeral: true,
+        });
+      }
+    }
+  },
+};

@@ -2,14 +2,6 @@ const { Client, Collection, GatewayIntentBits, Partials } = require("discord.js"
 const fs = require("fs");
 const path = require("path");
 
-// Import database functions
-const { initializeDatabase, loadMonitoredUsers, saveMonitoredUser, deleteMonitoredUser, backupDatabase } = require("./utils/db");
-
-// Initialize the database
-initializeDatabase();
-
-// Load monitored users on startup
-const monitoredUsers = loadMonitoredUsers();
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -26,20 +18,17 @@ const client = new Client({
   ]
 });
 
-// Create a collection to store commands
 const commands = new Collection();
 
-// Load commands
 const commandsPath = path.join(__dirname, "commands");
 const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith(".js"));
 
 for (const file of commandFiles) {
   const filePath = path.join(commandsPath, file);
   const command = require(filePath);
-  commands.set(command.name, command);
+  commands.set(command.data.name, command);
 }
 
-// Load events
 const eventsPath = path.join(__dirname, "events");
 const eventFiles = fs.readdirSync(eventsPath).filter(file => file.endsWith(".js"));
 
@@ -48,21 +37,12 @@ for (const file of eventFiles) {
   const event = require(filePath);
   
   if (event.once) {
-    client.once(event.name, (...args) => {
-      if (event.name === "ready") {
-        event.execute(client, monitoredUsers, saveMonitoredUser, backupDatabase);
-      } else {
-        event.execute(...args, client, monitoredUsers, saveMonitoredUser, commands);
-      }
-    });
+    client.once(event.name, (...args) => event.execute(...args, client, commands));
   } else {
-    client.on(event.name, (...args) => {
-      event.execute(...args, client, monitoredUsers, saveMonitoredUser, commands);
-    });
+    client.on(event.name, (...args) => event.execute(...args, client, commands));
   }
 }
 
-// Error handling
 client.on("error", (error) => {
   console.error("Client error:", error);
 });
@@ -76,14 +56,8 @@ process.on("uncaughtException", (error) => {
   process.exit(1);
 });
 
-
-
-// Login to Discord
 client.login(process.env.DISCORD_TOKEN);
 
-
-
-// Keep the bot alive on Replit
 const express = require("express");
 const app = express();
 
