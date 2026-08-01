@@ -18,11 +18,8 @@ if (fs.existsSync(commandsPath)) {
     for (const file of commandFiles) {
         const filePath = path.join(commandsPath, file);
         const command = require(filePath);
-        // This check prevents the crash if a file is missing the 'data' property
         if (command && command.data && command.data.name) {
             commands.set(command.data.name, command);
-        } else {
-            console.log(`[WARNING] The command at ${filePath} is missing a required "data" or "name" property.`);
         }
     }
 }
@@ -33,10 +30,11 @@ if (fs.existsSync(eventsPath)) {
     for (const file of eventFiles) {
         const filePath = path.join(eventsPath, file);
         const event = require(filePath);
+        // FIX: Pass commands correctly
         if (event.once) {
-            client.once(event.name, (...args) => event.execute(...args, client, commands));
+            client.once(event.name, (...args) => event.execute(...args, commands));
         } else {
-            client.on(event.name, (...args) => event.execute(...args, client, commands));
+            client.on(event.name, (...args) => event.execute(...args, commands));
         }
     }
 }
@@ -46,7 +44,6 @@ process.on("unhandledRejection", console.error);
 
 client.login(process.env.DISCORD_TOKEN);
 
-// Keep-alive server for Render
 const express = require("express");
 const app = express();
 app.get("/", (req, res) => res.send("Bot is alive!"));
