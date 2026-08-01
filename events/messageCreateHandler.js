@@ -1,4 +1,4 @@
-let tiklydownFn = null;
+ let tiklydownFn = null;
 async function getTiklydown() {
   if (!tiklydownFn) {
     const mod = await import('tiktok-scraper-without-watermark');
@@ -16,15 +16,7 @@ const fs = require("fs");
 const path = require("path");
 
 // ----- Dynamic import helper for ESM package -----
-let tiklydownFn = null;
-async function getTiklydown() {
-  if (!tiklydownFn) {
-    const module = await import('tiktok-scraper-without-watermark');
-    tiklydownFn = module.tiklydown; // named export
-  }
-  return tiklydownFn;
-}
-
+ 
 // ----- URL validation -----
 const STARTERS = [
   'https://vm.tiktok.com/', 'http://vm.tiktok.com/',
