@@ -1,8 +1,10 @@
 const { Events, EmbedBuilder, ChannelType } = require("discord.js");
-const { TiktokDL } = require("@tobyg74/tiktok-api-dl");
+const { execFile } = require("child_process");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
+const util = require("util");
+const execFilePromise = util.promisify(execFile);
 
 // ===== TikTok URL validation =====
 const STARTERS = [
@@ -23,26 +25,22 @@ function getValidTikTokLink(msg) {
   return undefined;
 }
 
-// ===== Main event =====
 module.exports = {
   name: Events.MessageCreate,
   async execute(message) {
     if (message.author.bot) return;
 
-    // Restrict to one channel
     const allowedChannelId = '790218273500168245';
     if (message.channel.id !== allowedChannelId) return;
 
     const tiktokURL = getValidTikTokLink(message.content);
     if (!tiktokURL) return;
 
-    // Permission check
     const canSendMessages =
       message.channel.type === ChannelType.DM ||
       message.channel.permissionsFor(message.client.user).has('SendMessages');
     if (!canSendMessages) return;
 
-    // Status message
     let statusMessage = await message.channel.send({
       embeds: [
         new EmbedBuilder()
@@ -53,14 +51,25 @@ module.exports = {
     });
 
     try {
-      // 1. Get the no-watermark video link using the new package
-      const result = await TiktokDL(tiktokURL);
+      // 1. Use yt-dlp to get the video info (no‑watermark by default)
+      const { stdout } = await execFilePromise(
+        path.join(__dirname, '..', 'yt-dlp'),   // path to the binary
+        [
+          '--dump-json',          // output JSON metadata
+          '--no-warnings',
+          '--no-playlist',
+          '--format', 'best',     // get best available (no watermark)
+          tiktokURL
+        ],
+        { timeout: 30000 }        // 30 seconds timeout
+      );
 
-      if (!result || !result.video || !result.video.noWatermark) {
-        throw new Error("Could not extract the video. It might be private or region-locked.");
-      }
-
-      const videoLink = result.video.noWatermark;
+      const info = JSON.parse(stdout);
+      const videoLink = info.requested_formats
+        ? info.requested_formats[0].url   // sometimes split formats
+        : info.url;
+      
+      if (!videoLink) throw new Error("Could not extract video URL.");
 
       await statusMessage.edit({
         embeds: [
@@ -86,25 +95,22 @@ module.exports = {
       response.data.pipe(writer);
 
       writer.on('finish', async () => {
-        // 3. Build embed
         const responseEmbed = new EmbedBuilder()
-          .setTitle(result.title || 'TikTok Video Ready')
+          .setTitle(info.title || 'TikTok Video Ready')
           .setURL(tiktokURL)
           .setDescription(`Requested by: ${message.author.tag}`)
           .addFields(
-            { name: 'Author', value: result.author?.unique_id || 'Unknown', inline: true },
-            { name: 'Likes', value: String(result.stats?.diggCount || 'N/A'), inline: true }
+            { name: 'Author', value: info.uploader || 'Unknown', inline: true },
+            { name: 'Likes', value: String(info.like_count || 'N/A'), inline: true }
           )
           .setColor('#00bfff')
           .setTimestamp();
 
-        // 4. Send the video
         await message.channel.send({
           embeds: [responseEmbed],
           files: [{ attachment: videoPath, name: 'tiktok_video.mp4' }]
         });
 
-        // Cleanup
         if (statusMessage.deletable) statusMessage.delete();
         fs.unlink(videoPath, (err) => { if (err) console.error(err); });
       });
