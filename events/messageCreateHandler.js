@@ -3,16 +3,9 @@ const tiktok = require("tiktok-scraper-without-watermark");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
-const dotenv = require("dotenv");
+ 
 
-dotenv.config();
-
-const TOKEN = process.env.DISCORD_BOT_TOKEN;
-if (!TOKEN) {
-  console.error("Missing DISCORD_BOT_TOKEN. Add it to .env as DISCORD_BBOT_TOKEN=your-token");
-  process.exit(1);
-}
-
+ 
 const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey, { auth: { persistSession: false } });
