@@ -1,3 +1,15 @@
+let tiklydownFn = null;
+async function getTiklydown() {
+  if (!tiklydownFn) {
+    const mod = await import('tiktok-scraper-without-watermark');
+    // DEBUG: show exactly what's exported
+    console.log('=== Module keys:', Object.keys(mod));
+    console.log('=== Default export:', mod.default);
+    console.log('=== Type of default:', typeof mod.default);
+    // Stop the bot after logging, so we can see the output clearly
+    process.exit(0);
+  }
+}
 const { Events, EmbedBuilder, ChannelType } = require("discord.js");
 const axios = require("axios");
 const fs = require("fs");
