@@ -31,6 +31,8 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(1024, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
+const DISCORD_MAX_SIZE = 25 * 1024 * 1024;  // 25 MB
+
 module.exports = {
   name: Events.MessageCreate,
   async execute(message) {
@@ -47,22 +49,23 @@ module.exports = {
       message.channel.permissionsFor(message.client.user).has('SendMessages');
     if (!canSendMessages) return;
 
-    // Delete original message
+    // Delete the original message (if possible)
     try { if (message.deletable) await message.delete(); } catch (e) {}
 
     let statusMessage = await message.channel.send({
       embeds: [new EmbedBuilder()
         .setTitle('⏳ Video Status')
-        .setDescription('Extracting video...')
-        .setColor('#ff66b2')]
+        .setDescription('Scraping video info...')
+        .setColor('#ff66b2')
+      ]
     });
 
     try {
       const projectRoot = path.join(__dirname, '..');
       const ytdlpPath = path.join(projectRoot, 'yt-dlp');
-      const ffmpegPath = path.join(projectRoot, 'bin', 'ffmpeg');  // only used by yt-dlp for merging if necessary
+      const ffmpegPath = path.join(projectRoot, 'bin', 'ffmpeg');   // only for merging, if needed
 
-      // 1. Get metadata (title, uploader, likes, etc.)
+      // 1. Get video metadata
       const { stdout } = await execFilePromise(
         ytdlpPath,
         ['--dump-json', '--no-playlist', tiktokURL],
@@ -73,28 +76,30 @@ module.exports = {
       await statusMessage.edit({
         embeds: [new EmbedBuilder()
           .setTitle('⏳ Video Status')
-          .setDescription('Downloading...')
-          .setColor('#ff66b2')]
+          .setDescription('Downloading video...')
+          .setColor('#ff66b2')
+        ]
       });
 
-      // 2. Download with a format that guarantees Discord compatibility
+      // 2. Prepare to download – use a Discord‑safe format
       const videoDir = path.join(projectRoot, 'videos');
       if (!fs.existsSync(videoDir)) fs.mkdirSync(videoDir);
       let videoPath = path.join(videoDir, `${Date.now()}.mp4`);
 
-      // Format: prefer a single pre‑muxed MP4 with H.264 + AAC, fallback to the best
-      const FORMAT_DISCORD_SAFE =
-        'best[ext=mp4][vcodec^=avc1][acodec=aac]/' +   // single MP4 with H.264 & AAC
-        'bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/' +  // merge separate streams (yt-dlp will use ffmpeg)
-        'best[ext=mp4]/' +                            // any single MP4
-        'best';                                        // fallback
+      // Format: prefer a single MP4 with H.264 video + AAC audio, then merge separate streams, then any MP4
+      const FORMAT_SAFE = [
+        'best[ext=mp4][vcodec^=avc1][acodec=aac]',                      // single file, perfect
+        'bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]',           // merge best parts
+        'best[ext=mp4]',                                                 // any single mp4
+        'best'                                                           // last resort
+      ].join('/');
 
       await execFilePromise(
         ytdlpPath,
         [
           '-o', videoPath,
           '--no-playlist',
-          '--format', FORMAT_DISCORD_SAFE,
+          '--format', FORMAT_SAFE,
           '--merge-output-format', 'mp4',
           '--ffmpeg-location', ffmpegPath,
           tiktokURL
@@ -102,26 +107,35 @@ module.exports = {
         { timeout: 90000 }
       );
 
-      // 3. Check file size
+      // 3. Check file size and fallback to 720p if necessary
       let stats = fs.statSync(videoPath);
-      if (stats.size > 25 * 1024 * 1024) {
-        // Too big → download a 720p version (fast, no re‑encode)
+
+      if (stats.size > DISCORD_MAX_SIZE) {
         await statusMessage.edit({
           embeds: [new EmbedBuilder()
             .setTitle('⏳ Video Status')
             .setDescription('File too large, downloading 720p version...')
-            .setColor('#ff66b2')]
+            .setColor('#ff66b2')
+          ]
         });
 
+        // Delete the oversized file
         fs.unlinkSync(videoPath);
         videoPath = path.join(videoDir, `${Date.now()}_720p.mp4`);
+
+        const FORMAT_720P_SAFE = [
+          'bestvideo[height<=720][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]',
+          'best[height<=720][ext=mp4][vcodec^=avc1]',
+          'best[height<=720][ext=mp4]',
+          'best[height<=720]'
+        ].join('/');
 
         await execFilePromise(
           ytdlpPath,
           [
             '-o', videoPath,
             '--no-playlist',
-            '--format', 'bestvideo[height<=720][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[height<=720][ext=mp4][vcodec^=avc1]/best[height<=720][ext=mp4]/best[height<=720]',
+            '--format', FORMAT_720P_SAFE,
             '--merge-output-format', 'mp4',
             '--ffmpeg-location', ffmpegPath,
             tiktokURL
@@ -130,20 +144,20 @@ module.exports = {
         );
 
         stats = fs.statSync(videoPath);
-        if (stats.size > 25 * 1024 * 1024) {
-          throw new Error('Even 720p version is too large. Discord limit is 25 MB.');
+        if (stats.size > DISCORD_MAX_SIZE) {
+          throw new Error(`Even 720p version is too large (${formatBytes(stats.size)}). Discord limit is 25 MB.`);
         }
       }
 
       const fileSize = formatBytes(stats.size);
 
-      // 4. Build embed (exactly as requested)
+      // 4. Prepare the embed (truncate description to 4096 characters)
       let description = info.description || info.title || 'No description';
       if (description.length > 4096) description = description.slice(0, 4093) + '...';
 
       const responseEmbed = new EmbedBuilder()
         .setTitle('🎵 TikTok Video Downloaded')
-        .setURL(tiktokURL)
+        .setURL(tiktokURL)                        // clickable title
         .setDescription(description)
         .addFields(
           { name: '👤 Creator', value: info.uploader || 'Unknown', inline: true },
@@ -166,18 +180,20 @@ module.exports = {
       fs.unlink(videoPath, () => {});
 
     } catch (err) {
-  console.error(err);
-  let errorMsg = err.message || 'Unknown error';
-  if (errorMsg.length > 4000) errorMsg = errorMsg.slice(0, 4000) + '...';
-  if (statusMessage.deletable) {
-    await statusMessage.edit({
-      embeds: [new EmbedBuilder()
-        .setTitle(':rotating_light: Error')
-        .setColor('#ff0000')
-        .setDescription(errorMsg)
-      ]
-    });
-  }
-}
-  }
+      // Ensure the error message never exceeds Discord embed limits
+      console.error(err);
+      let errorMsg = err.message || 'Unknown error';
+      if (errorMsg.length > 4000) errorMsg = errorMsg.slice(0, 4000) + '...';
+
+      if (statusMessage.deletable) {
+        await statusMessage.edit({
+          embeds: [new EmbedBuilder()
+            .setTitle(':rotating_light: Error')
+            .setColor('#ff0000')
+            .setDescription(errorMsg)
+          ]
+        });
+      }
+    }
+  },
 };
