@@ -1,5 +1,5 @@
 const { Events, EmbedBuilder, ChannelType } = require("discord.js");
-const { execFile } = require("child_process");
+const { execFile, execSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const util = require("util");
@@ -63,19 +63,16 @@ module.exports = {
     });
 
     try {
-      // Project root for binaries
       const projectRoot = path.join(__dirname, '..');
       const ytdlpPath = path.join(projectRoot, 'yt-dlp');
-      const binPath = path.join(projectRoot, 'bin');
-
-      // Add bin/ to PATH so yt-dlp finds ffmpeg
-      const env = { ...process.env, PATH: `${binPath}:${process.env.PATH}` };
+      const ffmpegPath = path.join(projectRoot, 'bin', 'ffmpeg');
+      const ffprobePath = path.join(projectRoot, 'bin', 'ffprobe');
 
       // 1. Get metadata
       const { stdout } = await execFilePromise(
         ytdlpPath,
         ['--dump-json', '--no-playlist', tiktokURL],
-        { timeout: 30000, env }
+        { timeout: 30000 }
       );
       const info = JSON.parse(stdout);
 
@@ -87,7 +84,7 @@ module.exports = {
         ]
       });
 
-      // 2. Download video – this format forces video+audio merged
+      // 2. Download video with forced ffmpeg location
       const videoDir = path.join(projectRoot, 'videos');
       if (!fs.existsSync(videoDir)) fs.mkdirSync(videoDir);
       const videoPath = path.join(videoDir, `${Date.now()}.mp4`);
@@ -99,23 +96,34 @@ module.exports = {
           '--no-playlist',
           '--format', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
           '--merge-output-format', 'mp4',
+          '--ffmpeg-location', ffmpegPath,      // <-- explicit path
           tiktokURL
         ],
-        { timeout: 60000, env }
+        { timeout: 60000 }
       );
+
+      // DEBUG: check file codecs (look in Render logs)
+      try {
+        const probe = execSync(`"${ffprobePath}" -v error -show_entries stream=codec_type -of default=noprint_wrappers=1 "${videoPath}"`).toString();
+        console.log('=== Codec types in downloaded file ===');
+        console.log(probe);
+        // Expect to see "codec_type=video" and "codec_type=audio"
+      } catch (probeErr) {
+        console.warn('ffprobe check failed:', probeErr.message);
+      }
 
       // 3. File size
       const stats = fs.statSync(videoPath);
       const fileSize = formatBytes(stats.size);
 
-      // 4. Embed description (truncate if needed)
+      // 4. Embed description
       let description = info.description || info.title || 'No description';
       if (description.length > 4096) description = description.slice(0, 4093) + '...';
 
-      // 5. Build final embed
+      // 5. Final embed
       const responseEmbed = new EmbedBuilder()
         .setTitle('🎵 TikTok Video Downloaded')
-        .setURL(tiktokURL)                                            // clickable title
+        .setURL(tiktokURL)
         .setDescription(description)
         .addFields(
           { name: '👤 Creator', value: info.uploader || 'Unknown', inline: true },
