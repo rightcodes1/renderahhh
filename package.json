@@ -11,6 +11,7 @@
   "license": "ISC",
   "description": "Discord bot to download TikTok videos without watermark",
   "dependencies": {
+    "axios": "^1.19.0",
     "discord.js": "^14.21.0",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",

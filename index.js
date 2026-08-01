@@ -1,3 +1,4 @@
+require("dotenv").config();
 const { Client, Collection, GatewayIntentBits, Partials } = require("discord.js");
 const fs = require("fs");
 const path = require("path");
@@ -31,7 +32,11 @@ if (fs.existsSync(eventsPath)) {
         const filePath = path.join(eventsPath, file);
         const event = require(filePath);
         // FIX: Pass commands correctly
-        if (event.once) {
+        if (event.name === 'messageCreate') {
+            client.on(event.name, (...args) => event.execute(...args));
+        } else if (event.name === 'interactionCreate') {
+            client.on(event.name, (...args) => event.execute(...args, commands));
+        } else if (event.once) {
             client.once(event.name, (...args) => event.execute(...args, commands));
         } else {
             client.on(event.name, (...args) => event.execute(...args, commands));
