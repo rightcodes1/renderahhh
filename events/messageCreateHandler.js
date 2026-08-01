@@ -24,6 +24,13 @@ function getValidTikTokLink(msg) {
   return undefined;
 }
 
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 Bytes';
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return parseFloat((bytes / Math.pow(1024, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
 module.exports = {
   name: Events.MessageCreate,
   async execute(message) {
@@ -44,12 +51,12 @@ module.exports = {
       embeds: [new EmbedBuilder()
         .setTitle('Video Status')
         .setDescription('Scraping video info...')
-        .setColor('#00bfff')
+        .setColor('#ff66b2')
       ]
     });
 
     try {
-      // 1. Get metadata (title, uploader, likes)
+      // 1. Get video metadata (title, uploader, views, likes)
       const { stdout } = await execFilePromise(
         path.join(__dirname, '..', 'yt-dlp'),
         ['--dump-json', '--no-playlist', tiktokURL],
@@ -61,34 +68,46 @@ module.exports = {
         embeds: [new EmbedBuilder()
           .setTitle('Video Status')
           .setDescription('Downloading video...')
-          .setColor('#00bfff')
+          .setColor('#ff66b2')
         ]
       });
 
-      // 2. Download the video directly with yt-dlp (handles all headers, no 403)
+      // 2. Download the video (proper video+audio) using yt-dlp + ffmpeg
       const videoDir = path.join(__dirname, '..', 'videos');
       if (!fs.existsSync(videoDir)) fs.mkdirSync(videoDir);
       const videoPath = path.join(videoDir, `${Date.now()}.mp4`);
 
+      // Use format string that guarantees video+audio in a single mp4 file
       await execFilePromise(
         path.join(__dirname, '..', 'yt-dlp'),
-        ['-o', videoPath, '--no-playlist', '--format', 'best', tiktokURL],
+        [
+          '-o', videoPath,
+          '--no-playlist',
+          '--format', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+          '--merge-output-format', 'mp4',   // ensure final file is mp4
+          tiktokURL
+        ],
         { timeout: 60000 }
       );
 
-      // 3. Build the embed
+      // 3. Get file size for embed
+      const stats = fs.statSync(videoPath);
+      const fileSize = formatBytes(stats.size);
+
+      // 4. Build the embed as requested
       const responseEmbed = new EmbedBuilder()
-        .setTitle(info.title || 'TikTok Video Ready')
-        .setURL(tiktokURL)
-        .setDescription(`Requested by: ${message.author.tag}`)
+        .setTitle('🎵 TikTok Video Downloaded')
+        .setDescription(info.description || info.title || 'No description')
         .addFields(
-          { name: 'Author', value: info.uploader || 'Unknown', inline: true },
-          { name: 'Likes', value: String(info.like_count || 'N/A'), inline: true }
+          { name: '👤 Creator', value: info.uploader || 'Unknown', inline: true },
+          { name: '📁 File Size', value: fileSize, inline: true },
+          { name: '👀 Views', value: (info.view_count || 0).toLocaleString(), inline: true },
+          { name: '❤️ Likes', value: (info.like_count || 0).toLocaleString(), inline: true }
         )
-        .setColor('#00bfff')
+        .setColor('#ff66b2')   // pink
         .setTimestamp();
 
-      // 4. Send the video
+      // 5. Send the video
       await message.channel.send({
         embeds: [responseEmbed],
         files: [{ attachment: videoPath, name: 'tiktok_video.mp4' }]
