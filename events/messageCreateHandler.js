@@ -42,8 +42,8 @@ async function makeDiscordSafe(inputPath, outputPath, crf = 22) {
     '-profile:v', 'main',
     '-level', '4.0',
     '-pix_fmt', 'yuv420p',
-    '-crf', `${crf}`,               // lower = better quality, larger file
-    '-preset', 'ultrafast',         // fast enough for free‑tier Render
+    '-crf', `${crf}`,
+    '-preset', 'ultrafast',
     '-c:a', 'aac',
     '-b:a', '128k',
     '-movflags', '+faststart',
@@ -86,7 +86,7 @@ module.exports = {
       const ytdlpPath = path.join(projectRoot, 'yt-dlp');
       const ffmpegPath = path.join(projectRoot, 'bin', 'ffmpeg');
 
-      // 1. Get metadata (title, uploader, views, etc.)
+      // 1. Get metadata
       const { stdout } = await execFilePromise(
         ytdlpPath,
         ['--dump-json', '--no-playlist', tiktokURL],
@@ -102,12 +102,11 @@ module.exports = {
         ]
       });
 
-      // 2. Use yt‑dlp to download the best video+audio merged file directly
+      // 2. Download raw video using yt‑dlp (no 403)
       const videoDir = path.join(projectRoot, 'videos');
       if (!fs.existsSync(videoDir)) fs.mkdirSync(videoDir);
       const rawPath = path.join(videoDir, `${Date.now()}_raw.mp4`);
 
-      // Format string: prefer a single MP4 with H.264 + AAC, then merge streams, then any MP4
       const format = 'bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best';
       await execFilePromise(
         ytdlpPath,
@@ -122,7 +121,7 @@ module.exports = {
         { timeout: 90000 }
       );
 
-      // 3. Re‑encode to be 100% Discord‑safe (always)
+      // 3. Re‑encode to Discord‑safe format (always)
       await statusMessage.edit({
         embeds: [new EmbedBuilder()
           .setTitle('⏳ Video Status')
@@ -132,13 +131,14 @@ module.exports = {
       });
 
       let safePath = path.join(videoDir, `${Date.now()}_safe.mp4`);
-      await makeDiscordSafe(rawPath, safePath, 22);   // good quality
-      fs.unlinkSync(rawPath);   // we no longer need the raw file
+      await makeDiscordSafe(rawPath, safePath, 22);
+      fs.unlinkSync(rawPath);
 
-      // 4. If the safe video is still > 25 MB, compress it further
+      // 4. Size check and multi‑stage fallback
       let stats = fs.statSync(safePath);
 
       if (stats.size > DISCORD_MAX_SIZE) {
+        // ----- Stage 1: Heavier compression, no scaling (CRF 28) -----
         await statusMessage.edit({
           embeds: [new EmbedBuilder()
             .setTitle('⏳ Video Status')
@@ -148,28 +148,19 @@ module.exports = {
         });
 
         const compressedPath = path.join(videoDir, `${Date.now()}_compressed.mp4`);
-        // Use a higher CRF (lower quality) and optionally downscale
-        const ffmpegPath = path.join(projectRoot, 'bin', 'ffmpeg');
-        // Try a two‑pass approach: first, just compress harder; if that fails, downscale to 720p
         await execFilePromise(ffmpegPath, [
           '-y', '-i', safePath,
-          '-c:v', 'libx264',
-          '-profile:v', 'main',
-          '-level', '4.0',
-          '-pix_fmt', 'yuv420p',
-          '-crf', '28',                // more aggressive compression
-          '-preset', 'ultrafast',
-          '-c:a', 'aac',
-          '-b:a', '128k',
-          '-movflags', '+faststart',
-          '-vsync', 'cfr',
-          '-r', '30',
+          '-c:v', 'libx264', '-profile:v', 'main', '-level', '4.0',
+          '-pix_fmt', 'yuv420p', '-crf', '28', '-preset', 'ultrafast',
+          '-c:a', 'aac', '-b:a', '128k',
+          '-movflags', '+faststart', '-vsync', 'cfr', '-r', '30',
           compressedPath
         ], { timeout: 120000 });
 
         stats = fs.statSync(compressedPath);
+
         if (stats.size > DISCORD_MAX_SIZE) {
-          // Downscale to 720p and compress again
+          // ----- Stage 2: 720p downscale (CRF 28) -----
           await statusMessage.edit({
             embeds: [new EmbedBuilder()
               .setTitle('⏳ Video Status')
@@ -178,32 +169,53 @@ module.exports = {
             ]
           });
           fs.unlinkSync(compressedPath);
-          const downscaledPath = path.join(videoDir, `${Date.now()}_720p.mp4`);
+          const down720Path = path.join(videoDir, `${Date.now()}_720p.mp4`);
           await execFilePromise(ffmpegPath, [
             '-y', '-i', safePath,
-            '-c:v', 'libx264',
-            '-profile:v', 'main',
-            '-level', '4.0',
-            '-pix_fmt', 'yuv420p',
-            '-vf', 'scale=-2:720',
-            '-crf', '28',
-            '-preset', 'ultrafast',
-            '-c:a', 'aac',
-            '-b:a', '128k',
-            '-movflags', '+faststart',
-            '-vsync', 'cfr',
-            '-r', '30',
-            downscaledPath
+            '-c:v', 'libx264', '-profile:v', 'main', '-level', '4.0',
+            '-pix_fmt', 'yuv420p', '-vf', 'scale=-2:720',
+            '-crf', '28', '-preset', 'ultrafast',
+            '-c:a', 'aac', '-b:a', '128k',
+            '-movflags', '+faststart', '-vsync', 'cfr', '-r', '30',
+            down720Path
           ], { timeout: 120000 });
-          fs.unlinkSync(safePath);
-          safePath = downscaledPath;
-          stats = fs.statSync(safePath);
+          stats = fs.statSync(down720Path);
 
           if (stats.size > DISCORD_MAX_SIZE) {
-            throw new Error('Even 720p version is too large for Discord (25 MB).');
+            // ----- Stage 3: 480p downscale (CRF 30) -----
+            await statusMessage.edit({
+              embeds: [new EmbedBuilder()
+                .setTitle('⏳ Video Status')
+                .setDescription('Still too large, downscaling to 480p...')
+                .setColor('#ff66b2')
+              ]
+            });
+            fs.unlinkSync(down720Path);
+            const down480Path = path.join(videoDir, `${Date.now()}_480p.mp4`);
+            await execFilePromise(ffmpegPath, [
+              '-y', '-i', safePath,
+              '-c:v', 'libx264', '-profile:v', 'main', '-level', '4.0',
+              '-pix_fmt', 'yuv420p', '-vf', 'scale=-2:480',
+              '-crf', '30',
+              '-preset', 'ultrafast',
+              '-c:a', 'aac', '-b:a', '128k',
+              '-movflags', '+faststart', '-vsync', 'cfr', '-r', '30',
+              down480Path
+            ], { timeout: 120000 });
+            fs.unlinkSync(safePath);
+            safePath = down480Path;
+            stats = fs.statSync(safePath);
+
+            if (stats.size > DISCORD_MAX_SIZE) {
+              throw new Error('Even 480p version is too large for Discord (25 MB).');
+            }
+          } else {
+            // 720p fits
+            fs.unlinkSync(safePath);
+            safePath = down720Path;
           }
         } else {
-          // Compressed version fits, replace
+          // Compressed without scaling fits
           fs.unlinkSync(safePath);
           safePath = compressedPath;
         }
@@ -211,7 +223,7 @@ module.exports = {
 
       const fileSize = formatBytes(stats.size);
 
-      // 5. Build embed (like your YouTube bot’s postDownloadActions)
+      // 5. Build embed
       let description = info.description || info.title || 'No description';
       if (description.length > 4096) description = description.slice(0, 4093) + '...';
 
