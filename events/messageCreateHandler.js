@@ -1,5 +1,5 @@
 const { Events, EmbedBuilder, ChannelType } = require("discord.js");
-const { execFile } = require("child_process");
+const { execFile, execSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const util = require("util");
@@ -32,46 +32,51 @@ function formatBytes(bytes) {
 }
 
 const DISCORD_MAX_SIZE = 25 * 1024 * 1024;      // 25 MB
-const TARGET_SIZE = 24 * 1024 * 1024;           // aim for 24 MB to stay safe
+const TARGET_SIZE = 24 * 1024 * 1024;           // 24 MB
 
-// -------------------- ffmpeg compression logic --------------------
+// ====== CHECK IF FILE HAS A VIDEO STREAM ======
+function hasVideoStream(filePath) {
+  const ffprobePath = path.join(__dirname, '..', 'bin', 'ffprobe');
+  try {
+    const probe = execSync(
+      `"${ffprobePath}" -v error -select_streams v:0 -show_entries stream=codec_type -of csv=p=0 "${filePath}"`
+    ).toString().trim();
+    return probe === 'video';
+  } catch (err) {
+    console.warn('ffprobe check failed:', err.message);
+    return false;
+  }
+}
+
+// ====== FFMPEG COMPRESSION ======
 async function compressVideo(inputPath, outputPath, targetBytes, durationSec, scale = null) {
   const ffmpegPath = path.join(__dirname, '..', 'bin', 'ffmpeg');
-  const audioBitrateK = 128; // 128 kbps audio
-  const targetTotalBitrateK = (targetBytes * 8) / durationSec / 1000; // kbps
+  const audioBitrateK = 128;
+  const targetTotalBitrateK = (targetBytes * 8) / durationSec / 1000;
   let videoBitrateK = targetTotalBitrateK - audioBitrateK;
-  // Safety – video bitrate shouldn’t go below 50 kbps
   if (videoBitrateK < 50) videoBitrateK = 50;
 
   const args = [
-    '-y',                                 // overwrite output
-    '-i', inputPath,
+    '-y', '-i', inputPath,
     '-c:v', 'libx264',
     '-b:v', `${Math.floor(videoBitrateK)}k`,
     '-maxrate', `${Math.floor(videoBitrateK * 1.2)}k`,
     '-bufsize', `${Math.floor(videoBitrateK * 2)}k`,
-    '-preset', 'fast',                    // faster encoding, still decent compression
+    '-preset', 'fast',
     '-c:a', 'aac',
     '-b:a', `${audioBitrateK}k`,
-    '-movflags', '+faststart'             // optimise for streaming
+    '-movflags', '+faststart'
   ];
-
-  // Apply scaling if requested (e.g., scale to 720p)
-  if (scale) {
-    args.push('-vf', `scale=${scale}`);
-  }
-
+  if (scale) args.push('-vf', `scale=${scale}`);
   args.push(outputPath);
-
-  await execFilePromise(ffmpegPath, args, { timeout: 120000 }); // 2 min max
+  await execFilePromise(ffmpegPath, args, { timeout: 120000 });
 }
-// ------------------------------------------------------------------
 
+// ====== MAIN EVENT ======
 module.exports = {
   name: Events.MessageCreate,
   async execute(message) {
     if (message.author.bot) return;
-
     const allowedChannelId = '790218273500168245';
     if (message.channel.id !== allowedChannelId) return;
 
@@ -83,19 +88,14 @@ module.exports = {
       message.channel.permissionsFor(message.client.user).has('SendMessages');
     if (!canSendMessages) return;
 
-    // Delete the original user message
-    try {
-      if (message.deletable) await message.delete();
-    } catch (err) {
-      console.warn('Could not delete original message:', err.message);
-    }
+    // Delete original message
+    try { if (message.deletable) await message.delete(); } catch (e) {}
 
     let statusMessage = await message.channel.send({
       embeds: [new EmbedBuilder()
         .setTitle('⏳ Video Status')
         .setDescription('Scraping video info...')
-        .setColor('#ff66b2')
-      ]
+        .setColor('#ff66b2')]
     });
 
     try {
@@ -103,153 +103,109 @@ module.exports = {
       const ytdlpPath = path.join(projectRoot, 'yt-dlp');
       const ffmpegPath = path.join(projectRoot, 'bin', 'ffmpeg');
 
-      // 1. Get metadata (we need duration for bitrate calculation)
-      const { stdout } = await execFilePromise(
-        ytdlpPath,
-        ['--dump-json', '--no-playlist', tiktokURL],
-        { timeout: 30000 }
-      );
+      // 1. Metadata
+      const { stdout } = await execFilePromise(ytdlpPath, ['--dump-json', '--no-playlist', tiktokURL], { timeout: 30000 });
       const info = JSON.parse(stdout);
 
-      await statusMessage.edit({
-        embeds: [new EmbedBuilder()
-          .setTitle('⏳ Video Status')
-          .setDescription('Downloading best quality...')
-          .setColor('#ff66b2')
-        ]
-      });
+      // 2. Download best quality (video+audio)
+      await statusMessage.edit({ embeds: [new EmbedBuilder().setTitle('⏳ Video Status').setDescription('Downloading best quality...').setColor('#ff66b2')] });
 
-      // 2. Download best quality (video+audio merged)
       const videoDir = path.join(projectRoot, 'videos');
       if (!fs.existsSync(videoDir)) fs.mkdirSync(videoDir);
       let videoPath = path.join(videoDir, `${Date.now()}.mp4`);
 
-      await execFilePromise(
-        ytdlpPath,
-        [
+      // Download using the format that forces merging
+      await execFilePromise(ytdlpPath, [
+        '-o', videoPath,
+        '--no-playlist',
+        '--format', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        '--merge-output-format', 'mp4',
+        '--ffmpeg-location', ffmpegPath,
+        tiktokURL
+      ], { timeout: 90000 });
+
+      // ✅ VALIDATE VIDEO STREAM EXISTS
+      if (!hasVideoStream(videoPath)) {
+        console.warn('Downloaded file lacks video – retrying with combined format...');
+        // Delete the broken file
+        fs.unlinkSync(videoPath);
+        videoPath = path.join(videoDir, `${Date.now()}_retry.mp4`);
+        // Use a format that TikTok always provides as a single stream (contains both)
+        await execFilePromise(ytdlpPath, [
           '-o', videoPath,
           '--no-playlist',
-          '--format', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+          '--format', 'mp4',               // forces a single mp4 container
           '--merge-output-format', 'mp4',
           '--ffmpeg-location', ffmpegPath,
           tiktokURL
-        ],
-        { timeout: 90000 }
-      );
+        ], { timeout: 90000 });
 
-      // 3. Check file size – compress if needed
+        if (!hasVideoStream(videoPath)) {
+          throw new Error('Downloaded video has no visual track. The TikTok link may be audio-only.');
+        }
+      }
+
+      // 3. Size check & compression
       let stats = fs.statSync(videoPath);
 
       if (stats.size > DISCORD_MAX_SIZE) {
-        // Need compression
-        await statusMessage.edit({
-          embeds: [new EmbedBuilder()
-            .setTitle('⏳ Video Status')
-            .setDescription('Compressing video... (may take a few moments)')
-            .setColor('#ff66b2')
-          ]
-        });
-
-        const duration = info.duration; // seconds
+        await statusMessage.edit({ embeds: [new EmbedBuilder().setTitle('⏳ Video Status').setDescription('Compressing video...').setColor('#ff66b2')] });
+        const duration = info.duration;
         const compressedPath = path.join(videoDir, `${Date.now()}_compressed.mp4`);
 
-        try {
-          if (duration && duration > 0) {
-            // First attempt: smart bitrate compression without downscaling
-            await compressVideo(videoPath, compressedPath, TARGET_SIZE, duration);
+        if (duration && duration > 0) {
+          // First attempt: smart bitrate compression
+          await compressVideo(videoPath, compressedPath, TARGET_SIZE, duration);
+          stats = fs.statSync(compressedPath);
+        }
+
+        // If still too large, downscale to 720p
+        if (duration && fs.existsSync(compressedPath) && stats.size > DISCORD_MAX_SIZE) {
+          const downscaledPath = path.join(videoDir, `${Date.now()}_720p.mp4`);
+          await compressVideo(videoPath, downscaledPath, TARGET_SIZE, duration, '-2:720');
+          stats = fs.statSync(downscaledPath);
+          if (stats.size <= DISCORD_MAX_SIZE) {
+            fs.unlinkSync(compressedPath);
+            fs.renameSync(downscaledPath, compressedPath);
             stats = fs.statSync(compressedPath);
           } else {
-            throw new Error('No duration info, cannot calculate bitrate');
-          }
-        } catch (compressErr) {
-          console.warn('Compression failed or file still too large:', compressErr.message);
-          // Clean up partial compressed file if exists
-          if (fs.existsSync(compressedPath)) fs.unlinkSync(compressedPath);
-          // We'll try a lower quality download later
-        }
-
-        // If after compression the file is still over the limit, try downscaling to 720p
-        if (fs.existsSync(compressedPath) && stats.size > DISCORD_MAX_SIZE && duration) {
-          console.log('Still too large, downscaling to 720p...');
-          const downscaledPath = path.join(videoDir, `${Date.now()}_720p.mp4`);
-          try {
-            await compressVideo(videoPath, downscaledPath, TARGET_SIZE, duration, '-2:720');
-            stats = fs.statSync(downscaledPath);
-            // Replace with downscaled version
-            if (stats.size <= DISCORD_MAX_SIZE) {
-              fs.unlinkSync(compressedPath);
-              fs.renameSync(downscaledPath, compressedPath);
-              stats = fs.statSync(compressedPath);
-            } else {
-              fs.unlinkSync(downscaledPath);
-              throw new Error('Still too large after downscaling');
-            }
-          } catch (scaleErr) {
-            console.warn('720p downscale failed:', scaleErr.message);
-            if (fs.existsSync(downscaledPath)) fs.unlinkSync(downscaledPath);
+            fs.unlinkSync(downscaledPath);
           }
         }
 
-        // If we have a valid compressed file that fits, use it
+        // Use compressed file if it fits
         if (fs.existsSync(compressedPath) && stats.size <= DISCORD_MAX_SIZE) {
-          // Remove original large file
           fs.unlinkSync(videoPath);
           videoPath = compressedPath;
         } else {
-          // Compression didn't work – fallback: download a lower quality version from yt-dlp
+          // Final fallback: download smaller version
           if (fs.existsSync(compressedPath)) fs.unlinkSync(compressedPath);
           fs.unlinkSync(videoPath);
           videoPath = path.join(videoDir, `${Date.now()}_small.mp4`);
-
-          await statusMessage.edit({
-            embeds: [new EmbedBuilder()
-              .setTitle('⏳ Video Status')
-              .setDescription('Downloading smaller version (720p)...')
-              .setColor('#ff66b2')
-            ]
-          });
-
-          await execFilePromise(
-            ytdlpPath,
-            [
-              '-o', videoPath,
-              '--no-playlist',
-              '--format', 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
-              '--merge-output-format', 'mp4',
-              '--ffmpeg-location', ffmpegPath,
-              tiktokURL
-            ],
-            { timeout: 60000 }
-          );
-
+          await statusMessage.edit({ embeds: [new EmbedBuilder().setTitle('⏳ Video Status').setDescription('Downloading smaller version...').setColor('#ff66b2')] });
+          await execFilePromise(ytdlpPath, [
+            '-o', videoPath,
+            '--no-playlist',
+            '--format', 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
+            '--merge-output-format', 'mp4',
+            '--ffmpeg-location', ffmpegPath,
+            tiktokURL
+          ], { timeout: 60000 });
           stats = fs.statSync(videoPath);
-
-          // If the 720p download is still too large, try one final compression
-          if (stats.size > DISCORD_MAX_SIZE && info.duration) {
-            const finalCompressed = path.join(videoDir, `${Date.now()}_final.mp4`);
-            await compressVideo(videoPath, finalCompressed, TARGET_SIZE, info.duration, '-2:720');
-            if (fs.existsSync(finalCompressed) && fs.statSync(finalCompressed).size <= DISCORD_MAX_SIZE) {
-              fs.unlinkSync(videoPath);
-              videoPath = finalCompressed;
-              stats = fs.statSync(videoPath);
-            }
-          }
         }
       }
 
-      // Final size check – if still too large, give clear error
+      // Final size guard
       stats = fs.statSync(videoPath);
       if (stats.size > DISCORD_MAX_SIZE) {
-        throw new Error(`Video is too large (${formatBytes(stats.size)}) and could not be compressed enough. Discord limit is 25 MB.`);
+        throw new Error(`Video too large (${formatBytes(stats.size)}). Cannot be compressed under 25 MB.`);
       }
 
+      // 4. Embed
       const fileSize = formatBytes(stats.size);
-
-      // 4. Build embed description
       let description = info.description || info.title || 'No description';
       if (description.length > 4096) description = description.slice(0, 4093) + '...';
 
-      // 5. Final embed
       const responseEmbed = new EmbedBuilder()
         .setTitle('🎵 TikTok Video Downloaded')
         .setURL(tiktokURL)
@@ -264,7 +220,6 @@ module.exports = {
         .setFooter({ text: `Requested by ${message.author.tag}` })
         .setTimestamp();
 
-      // 6. Send the video
       await message.channel.send({
         embeds: [responseEmbed],
         files: [{ attachment: videoPath, name: 'tiktok_video.mp4' }]
@@ -272,10 +227,10 @@ module.exports = {
 
       // Cleanup
       if (statusMessage.deletable) statusMessage.delete();
-      fs.unlink(videoPath, (err) => { if (err) console.error(err); });
+      fs.unlink(videoPath, () => {});
 
     } catch (err) {
-      console.error(`Error: ${err.message}`);
+      console.error(err);
       if (statusMessage.deletable) {
         await statusMessage.edit({
           embeds: [new EmbedBuilder()
@@ -286,5 +241,5 @@ module.exports = {
         });
       }
     }
-  },
+  }
 };
