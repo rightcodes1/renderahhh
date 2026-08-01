@@ -4,7 +4,6 @@ const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 const dotenv = require("dotenv");
-const { createClient } = require("@supabase/supabase-js");
 
 dotenv.config();
 
