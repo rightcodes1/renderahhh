@@ -1,23 +1,20 @@
- let tiklydownFn = null;
-async function getTiklydown() {
-  if (!tiklydownFn) {
-    const mod = await import('tiktok-scraper-without-watermark');
-    // DEBUG: show exactly what's exported
-    console.log('=== Module keys:', Object.keys(mod));
-    console.log('=== Default export:', mod.default);
-    console.log('=== Type of default:', typeof mod.default);
-    // Stop the bot after logging, so we can see the output clearly
-    process.exit(0);
-  }
-}
 const { Events, EmbedBuilder, ChannelType } = require("discord.js");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
 
-// ----- Dynamic import helper for ESM package -----
- 
-// ----- URL validation -----
+// ===== Dynamic import helper for the ESM-only package =====
+let downloadFn = null;
+async function getDownloadFunction() {
+  if (!downloadFn) {
+    const mod = await import('tiktok-scraper-without-watermark');
+    // musicallydown is one of the named exports (confirmed by your debug log)
+    downloadFn = mod.musicallydown;
+  }
+  return downloadFn;
+}
+
+// ===== TikTok URL validation =====
 const STARTERS = [
   'https://vm.tiktok.com/', 'http://vm.tiktok.com/',
   'https://www.tiktok.com/', 'http://www.tiktok.com/',
@@ -25,7 +22,7 @@ const STARTERS = [
   'https://vt.tiktok.com/', 'http://vt.tiktok.com/'
 ];
 
-const TIKTOK_URL_REGEX = /^https?:\/\/(www|vm|m|vt)\.tiktok\.com\/[^\s]+$/; // fixed regex
+const TIKTOK_URL_REGEX = /^https?:\/\/(www|vm|m|vt)\.tiktok\.com\/[^\s]+$/;
 
 function getValidTikTokLink(msg) {
   for (const element of msg.split(/\s+/)) {
@@ -36,51 +33,58 @@ function getValidTikTokLink(msg) {
   return undefined;
 }
 
-// ----- Main event handler -----
+// ===== Main event =====
 module.exports = {
   name: Events.MessageCreate,
   async execute(message) {
     if (message.author.bot) return;
 
+    // Restrict to one channel
     const allowedChannelId = '790218273500168245';
     if (message.channel.id !== allowedChannelId) return;
 
     const tiktokURL = getValidTikTokLink(message.content);
     if (!tiktokURL) return;
 
-    // Permission check (using ChannelType for DMs)
-    const canSendMessages = message.channel.type === ChannelType.DM ||
+    // Permission check
+    const canSendMessages =
+      message.channel.type === ChannelType.DM ||
       message.channel.permissionsFor(message.client.user).has('SendMessages');
     if (!canSendMessages) return;
 
+    // Status message
     let statusMessage = await message.channel.send({
-      embeds: [new EmbedBuilder()
-        .setTitle('Video Status')
-        .setDescription('Scraping video link...')
-        .setColor('#00bfff')
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('Video Status')
+          .setDescription('Scraping video link...')
+          .setColor('#00bfff')
       ]
     });
 
     try {
-      // Get the function dynamically
-      const tiklydown = await getTiklydown();
-      const result = await tiklydown(tiktokURL);
+      // 1. Get the no-watermark video link using musicallydown
+      const download = await getDownloadFunction();
+      const result = await download(tiktokURL);
 
+      // The result structure may vary – adjust if needed
+      // For musicallydown, it typically has { video: { noWatermark: "..." } }
       if (!result || !result.video || !result.video.noWatermark) {
-        throw new Error("Could not extract the video from this link. It might be private or region-locked.");
+        throw new Error("Could not extract the video. It might be private or region-locked.");
       }
 
       const videoLink = result.video.noWatermark;
 
       await statusMessage.edit({
-        embeds: [new EmbedBuilder()
-          .setTitle('Video Status')
-          .setDescription('Downloading video...')
-          .setColor('#00bfff')
+        embeds: [
+          new EmbedBuilder()
+            .setTitle('Video Status')
+            .setDescription('Downloading video...')
+            .setColor('#00bfff')
         ]
       });
 
-      // Download video stream
+      // 2. Download the video file
       const response = await axios({
         url: videoLink,
         method: 'GET',
@@ -95,22 +99,25 @@ module.exports = {
       response.data.pipe(writer);
 
       writer.on('finish', async () => {
+        // 3. Build embed
         const responseEmbed = new EmbedBuilder()
           .setTitle(result.title || 'TikTok Video Ready')
           .setURL(tiktokURL)
           .setDescription(`Requested by: ${message.author.tag}`)
           .addFields(
-            { name: 'Author', value: result.author ? result.author.unique_id : 'Unknown', inline: true },
+            { name: 'Author', value: result.author?.unique_id || 'Unknown', inline: true },
             { name: 'Likes', value: String(result.stats?.diggCount || 'N/A'), inline: true }
           )
           .setColor('#00bfff')
           .setTimestamp();
 
+        // 4. Send the video
         await message.channel.send({
           embeds: [responseEmbed],
-          files: [{ attachment: videoPath, name: `tiktok_video.mp4` }]
+          files: [{ attachment: videoPath, name: 'tiktok_video.mp4' }]
         });
 
+        // Cleanup
         if (statusMessage.deletable) statusMessage.delete();
         fs.unlink(videoPath, (err) => { if (err) console.error(err); });
       });
@@ -119,10 +126,11 @@ module.exports = {
       console.error(`Error: ${err.message}`);
       if (statusMessage.deletable) {
         await statusMessage.edit({
-          embeds: [new EmbedBuilder()
-            .setTitle(':rotating_light: Error')
-            .setColor('#ff0000')
-            .setDescription(err.message)
+          embeds: [
+            new EmbedBuilder()
+              .setTitle(':rotating_light: Error')
+              .setColor('#ff0000')
+              .setDescription(err.message)
           ]
         });
       }
